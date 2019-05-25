@@ -1,0 +1,414 @@
+---
+title: "Airbnb user insights and app sessions EDA"
+output:
+  html_document:
+    df_print: paged
+---
+The Airbnb dataset includes 2 major datasets on new users' insights and app session whose details are as follows: 
+
+1. users_train.csv 
++ id: user id
++ date_account_created: the date of account creation
++ timestamp_first_active: timestamp of the first activity, note that it can be earlier than date_account_created or date_first_booking because a user can search before signing up
++ date_first_booking: date of first booking
++ gender
++ age
++ signup_method
++ signup_flow: the page a user came to sign up from
++ language: international language preference
++ affiliate_channel: what kind of paid marketing
++ affiliate_provider: where the marketing is e.g. google, craigslist, other
++ first_affiliate_tracked: the first marketing the user interacted with before the signing up
++ signup_app
++ first_device_type
++ first_browser
++ country_destination: this is the target variable you are to predict
+
+2. sessions.csv - web sessions log for users 
++ user_id: to be joined with the column 'id' in users table,
++ action,
++ action_type,
++ action_detail,
++ device_type,
++ secs_elapsed.
+
+Load the dataset:
+  
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggcorrplot)
+library(plyr)
+library(psych)
+library(caret)
+library(tidyverse)
+```
+
+
+```{r warning=TRUE, include=FALSE}
+full = read.csv("E:/MSBA/7 Predictive Analytics/Project/Datasets/train_users.csv")
+sessions=read.csv("E:/MSBA/7 Predictive Analytics/Project/Datasets/sessions.csv")
+```
+
+
+```{r}
+str(full)
+str(sessions)
+```
+
+Create new binary variable "book" to see whether or not a user proceed to booking, based on country_destination (in which NDF means no booking):
+
+```{r}
+full = mutate(full, book = ifelse(country_destination=="NDF", 0, 1))
+head(full$book)
+
+```
+
+
+## Data preprocessing
+
+Check the pattern of missing data:
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(plyr)
+# Unique values per column
+lapply(full, function(x) length(unique(x))) 
+```
+
+
+```{r fig.align='center'}
+missing_values = full %>% 
+  summarize_all(funs(sum(is.na(.))/n()))
+
+missing_values = gather(missing_values, key="feature", value="missing_pct")
+
+missing_values %>% 
+  ggplot(aes(x=reorder(feature,-missing_pct),y=missing_pct))+
+  geom_bar(stat="identity",fill="tomato3")+
+  coord_flip()+theme_bw()
+```
+
+The result shows that in the training set only 60% of the observations are complete with 45% missing in gender, 42% missing in age. Since the purpose of the analysis is to identify differences in user behavior among different age and gender groups, we can't afford to remove age and gender or impute a categorical variable like gender. If a better dataset is not available, removing incomplete observations will work better.  
+
+
+```{r}
+newdata=na.omit(full) # no dummification
+newdata=newdata %>%
+  filter(age < 100 & age>18) %>%
+  droplevels() # remove people over 100 years old and under 18 (Airbnb terms require users to be at leats 18 years of age)
+```
+
+
+Create a new variable "agegroup", selecting age brackets based on a cluster analysis of 5 major groups of users.
+
+```{r message=FALSE, warning=FALSE}
+newdata$agegroup[newdata$age<26]="Below 26"
+newdata$agegroup[newdata$age<36 & newdata$age>25]="26 to 35"
+newdata$agegroup[newdata$age<46 & newdata$age>35]="36 to 45"
+newdata$agegroup[newdata$age<56 & newdata$age>45]="46 to 55"
+newdata$agegroup[newdata$age>55]="Over 56"
+newdata$agegroup=factor(newdata$agegroup, levels = c("Below 26", "26 to 35", "36 to 45", "46 to 55", "Over 56"))
+```
+
+
+Combine tables to join the sessions dataset, removing observations that are not included in the full dataset. 
+
+```{r}
+library(plyr)
+join=join(newdata, sessions, by="id", type= "inner", match="all")
+join=na.omit(join)
+newsessions=select(join, 1:6)
+```
+
+Drop insignificant levels ofvariable action (there are over 200 levels)
+
+```{r}
+join = join %>% group_by(join$action) %>%
+  filter(n() >= 100) %>%
+  droplevels()
+```
+
+
+## Exploratory Data Analysis 
+
+It should be noted that the dataset is made up mostly of categorical variables, which makes it hard to create correlation plots, box plots and scatter plots. Some notable trends are shown as follows:
+
+
+
+### Demographics of users who proceeded to booking? 
+
+```{r fig.align='center'}
+m = subset(newdata$gender, newdata$book==1)
+barplot(prop.table(table(newdata$gender)), main = "Distribution of users who booked by gender", col="orange2")
+```
+
+
+### Destination popularity 
+
+```{r fig.width=10}
+ggplot(newdata, aes(x=country_destination, fill=gender)) +
+  geom_bar(position="dodge")+
+  labs(title="Country destination broken down by gender")
+  
+```
+
+* Note: NDF is the people who don't book homestays at all. 
+Because the dataset is collected on US users and most users are female, it's expected that America is the most popular. Other than that, France and Spain are the most preferred destinations, and females dominate males in almost all country classes.
+
+
+
+
+
+### Is there any difference in the age distribution of users who proceeded to booking and those who did not? 
+
+```{r fig.width=9, fig.align='center', message=FALSE, warning=FALSE}
+m = subset(newdata$age, newdata$book==1)
+n = subset(newdata$age, newdata$book==0)
+plot(density(m), col="red", main="Age distribution", xlab="Age")
+lines(density(n))
+```
+
+Note: Users who were converted are younger than the other group. The golden age bracket is 25 to 35. 
+
+
+### What are the most popular devices? 
+
+```{r fig.width=10}
+ggplot(newdata,
+       aes(x=reorder(first_device_type, first_device_type,
+                     function(x)-length(x)))) +
+  geom_bar(fill = "orange2")+
+  labs(title = "First device type frequency") +
+  xlab("Device")+
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+```
+
+Desktop is still the most common device used to check Airbnb, followed by iPad and iPhone. This means that Airbnb should prioritize these platforms when it comes to A/B testing, feature launches and app optimization. 
+
+
+
+
+### What are the most common affiliate channels and providers? 
+
+```{r fig.width=10}
+ggplot(newdata,
+       aes(x=reorder(affiliate_channel, affiliate_channel,
+                     function(x)-length(x)))) +
+  geom_bar(fill = "orange2")+
+  labs(title = "Affiliate channel") +
+  xlab("Channel")
+```
+
+
+
+```{r fig.width=10}
+ggplot(newdata,
+       aes(x=reorder(affiliate_provider, affiliate_provider,
+                     function(x)-length(x)))) +
+  geom_bar(fill="orange2")+
+  labs(title = "Affiliate providers") +
+  xlab("Provider")+
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+```
+
+
+
+
+### What affiliate channels and providers have the highest conversion rate? 
+
+```{r fig.width=10, fig.align='center'}
+newdata$book=as.factor(newdata$book)
+ggplot(newdata, aes(x=affiliate_channel, fill=book))+
+  geom_bar(position="stack")+
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+Content seems to be the worst channel considering conversion rate. Other channels are almost similar in conversion power. A closer look with a proportion table:
+
+```{r}
+prop.table(table(newdata$book, newdata$affiliate_channel), margin = 2)
+```
+
+Note: Direct and SEO have the highest conversion rate, followed by SEM brand and API. 
+
+
+```{r fig.width=12, fig.align='center'}
+newdata$book=as.factor(newdata$book)
+ggplot(newdata, aes(x=affiliate_provider, fill=book))+
+  geom_bar(position="stack")+
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+Facebook doesn't perform as well as Direct and Google as an affiliate provider. A closer look:  
+
+```{r}
+prop.table(table(newdata$book, newdata$affiliate_provider), margin = 2)
+```
+
+Notable trends: 
+
+
++ Direct sources bring in the highest conversion rate, which is expected because people accessing Airbnb directly often have stronger intention to book homestays than those visiting upon seeing ads or affiliate links. 
++ Comparing search engines, Baidu is the best performer (54%), followed by Google and Bing. Yahoo was left behind with a conversion rate of 41%. Naver (Korean equivalent of Yahoo) and Yandex are the worst two. 
++ Comparing listing sites, Craigslist is better than Padmapper. 
++ Social networking sites don't do very well in terms of conversion. Facebook, the best one, offers a rate of only 39%, while Meetup does 27% and Wayn 0%. 
+
+
+### Do the most common affiliate channels differ across age groups? 
+
+```{r fig.width=10}
+ggplot(newdata, aes(x=agegroup, fill=affiliate_channel))+
+  geom_bar(position="fill")+
+  ylab("proportion")
+```
+
+Direct is the most popular channel for the two most active age groups, which is probably because these users already know about Airbnb and go straight to the site to browse and book homestays. Meanwhile, younger and older users have a higher chance of discovering Airbnb from content (i.e. reading travel articles/promotion emails) and SEM non-brand (i.e. typing travel related keywords on search engines). 
+
+
+
+
+
+### What are the most common 'first marketing' with which users interact before signup? 
+
+```{r fig.width=10}
+ggplot(newdata,
+       aes(x=reorder(first_affiliate_tracked, first_affiliate_tracked,
+                     function(x)-length(x)))) +
+  geom_bar(fill="orange2")+
+  labs(title = "First affiliate tracked") +
+  xlab("Device")
+```
+
+Airbnb doesn't provide detailed information on each type of marketing so it's hard to interpret this clearly, but we can see untracked dominates other types of marketing. 
+
+
+
+### What are the most common signup method? 
+
+```{r fig.align='center'}
+ggplot(newdata,
+       aes(x=reorder(signup_method, signup_method,
+                     function(x)-length(x)))) +
+  geom_bar(fill="orange2")+
+  labs(title = "Signup method") +
+  xlab("Device")
+```
+
+Facebook is still the most popular with its quick and convenient access. 
+
+
+
+
+
+### What are the most common browsers?
+
+```{r fig.width=10}
+ggplot(newdata,
+       aes(x=reorder(first_browser, first_browser,
+                     function(x)-length(x)))) +
+  geom_bar(fill="orange2")+
+  theme(axis.text.x = element_text(angle = 55, hjust = 1))+
+  labs(title="First browser", x = "Browser")
+```
+
+
+Given that Mac Desktop is the most prevalent device, at first glance the plot could seem weird that Chrome is the most popular browser. However, if we take both Safari and Mobile Safari into consideration, the total amount is almost equal to that of Chrome. Another point to consider is that many Mac users choose Chrome over Safari for multiple reasons. 
+
+
+
+
+## A closer look
+
+### Users' age distribution broken down by affiliate channels 
+
+```{r fig.align='center', message=FALSE, warning=FALSE}
+ggplot(newdata, aes(x=affiliate_channel, y=age))+
+  geom_boxplot()+
+  coord_flip()
+  labs(title="Affiliate channel by age")
+```
+
+The plot above provides a better look on which channels are best for different age groups. Channels with a "taller" boxplot tend to be more effective with older users. For example, content, remarketing and SEM non-brand are well suited for middle-aged people. 
+
+
+
+### Users' age distribution broken down by affiliate providers 
+
+```{r fig.align = 'center'}
+ggplot(newdata, aes(x=affiliate_provider, y=age))+
+  geom_boxplot()+
+  labs(title="Affiliate provider by age")+
+  coord_flip()
+```
+
+Similarly, we could say that Bing, GSP, Vast and Yahoo are more effective with older users, while the likes of Baidu, Meetup and Yandex are more popular among young users. 
+
+
+
+
+### Is there any clear difference in signup method among different age groups?
+
+```{r fig.width=10}
+ggplot(newdata, aes(x=agegroup, fill=signup_method))+
+  geom_bar(position="dodge")
+```
+
+The answer: Yes! Most young people sign up using Facebook, while older folks often go with traditional signup This also mean that it's easier to collect data on young users (i.e. from their Facebook page) and promote new campaigns to this group of users on Facebook. 
+
+
+
+### What are the most common affiliate channels for each gender? 
+
+```{r fig.align='center'}
+ggplot(newdata, aes(x=gender, fill=affiliate_provider))+
+  geom_bar(position="fill")+
+  ylab("proportion")
+```
+
+
+
+
+### What are the most common first marketing for each age group? 
+
+```{r fig.width=10}
+ggplot(newdata, aes(x=agegroup, fill=first_affiliate_tracked))+
+  geom_bar(position="stack")
+```
+
+
+```{r fig.width=10}
+summary(join$secs_elapsed)
+```
+
+There are so many outliers that it's hard to plot a good boxplot. Let's transform the second data into minutes to reduce the sparseness of the data. 
+
+
+
+### Time to the first booking by age
+
+```{r fig.align='center'}
+ggplot(join, aes(x=age, y=secs_elapsed))+
+  geom_point()+
+  labs(title = "Seconds elapsed by age")
+```
+
+
+It's interesting that the most active user groups spend a longer time to proceed to their first booking, while most older users decide very quickly on their trip. One possible reason for this is that young users tend to check and compare the various options they have (i.e. Booking.com, Agoda, Traveloka, etc.) or wait until finding a good deal, while old users, having access to less options, make up their mind quicker. 
+
+
+### What are the most common actions on app? 
+
+
+```{r fig.width=15, fig.height= 15}
+ggplot(join, aes(x=reorder(action, action,
+                     function(x)-length(x)))) + 
+  geom_bar(fill = "orange2")+
+  labs(title = "Action on app") +
+  xlab("Action")+
+  coord_flip()+
+  theme(text = element_text(size=13))
+        
+```
+
+
