@@ -1,6 +1,6 @@
 # Airbnb-App-Sessions-EDA
 
-View on RPubs: http://rpubs.com/michelledo202/abnb
+View visualization on RPubs: http://rpubs.com/michelledo202/abnb
 
 The Airbnb dataset includes 2 major datasets on new users’ insights and app session whose details are as follows:
 
